@@ -10,12 +10,15 @@ import (
 	"github.com/gliderlabs/ssh"
 	"github.com/sirupsen/logrus"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 var args struct {
 	LogLevel       string `arg:"-l"`
 	Address        string `arg:"-L" default:"0.0.0.0:2222"`
+	PidFile        string `arg:"-P"`
 	HostKeyFile    string `arg:"-k" default:"/etc/lightsshd/ssh_host_ed25519_key"`
 	AuthorizedKeys string `arg:"-a" default:"/etc/lightsshd/authorized_keys"`
 }
@@ -37,6 +40,15 @@ func main() {
 		logger.SetLevel(logrus.ErrorLevel)
 	}
 
+	if args.PidFile != "" {
+		pidFile, err := os.Create(args.PidFile)
+		if err != nil {
+			logger.Fatalf("unable to open pidfile: %v", err)
+		}
+		_, _ = pidFile.WriteString(fmt.Sprintf("%d", os.Getpid()))
+	}
+	go signalHandler()
+
 	connHandler := ConnectionHandler{
 		authorizedKeys: args.AuthorizedKeys,
 		defaultCmd:     []string{"/bin/bash"},
@@ -46,10 +58,27 @@ func main() {
 		opts = append(opts, ssh.HostKeyFile(args.HostKeyFile))
 		createHostKey(args.HostKeyFile)
 	}
-
 	opts = append(opts, ssh.PublicKeyAuth(connHandler.PKHandler))
-
 	logrus.Fatalf("unable to listen: %v", ssh.ListenAndServe(args.Address, connHandler.Handle, opts...))
+}
+
+func signalHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	signal.Notify(c, syscall.SIGTERM)
+	signal.Notify(c, os.Kill)
+
+	s := <-c
+	logger.Infof("Got signal: %v", s)
+
+	if args.PidFile != "" {
+		err := os.Remove(args.PidFile)
+		if err != nil {
+			logger.Fatalf("unable to remove pidfile")
+			return
+		}
+	}
+	os.Exit(0)
 }
 
 func createHostKey(keyFile string) {
